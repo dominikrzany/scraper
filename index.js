@@ -26,7 +26,12 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
  * Create CSV writer for saving data
  * @returns {Object} Configured CSV writer
  */
-function createCsvFile() {
+/**
+ * Create CSV writer for saving data
+ * @param {boolean} append - Whether to append to existing file
+ * @returns {Object} Configured CSV writer
+ */
+function createCsvFile(append = false) {
   const outputPath = path.join(config.outputDir, 'ecoinvent_data.csv');
   const csvWriter = createCsvWriter({
     path: outputPath,
@@ -37,7 +42,8 @@ function createCsvFile() {
       { id: 'referenceProduct', title: 'Reference Product' },
       { id: 'unit', title: 'Unit' },
       { id: 'documentation', title: 'Documentation' }
-    ]
+    ],
+    append: append // Set to true to append to existing file instead of overwriting
   });
   
   return csvWriter;
@@ -51,11 +57,33 @@ async function scrapeProductNames() {
   const debugStartId = config.startId;
   const debugEndId = config.endId;
   
-  // Array to collect all results for CSV export
-  const allResults = [];
+  // Ensure output directory exists
+  await fs.ensureDir(config.outputDir);
   
-  // Create CSV writer
-  const csvWriter = createCsvFile();
+  // Check if CSV file exists and create appropriate CSV writers
+  const csvPath = path.join(config.outputDir, 'ecoinvent_data.csv');
+  let fileExists = false;
+  try {
+    const stats = await fs.stat(csvPath);
+    fileExists = stats.isFile();
+    console.log(`CSV file ${fileExists ? 'already exists - will append to it' : 'does not exist - will create new file'}`);
+  } catch (error) {
+    console.log('CSV file does not exist yet - will create new file');
+  }
+  
+  // Create two CSV writers - one for initialization and one for appending
+  // We'll use initialCsvWriter only if the file doesn't exist yet
+  const initialCsvWriter = createCsvFile(false); // For writing headers (not append)
+  const appendCsvWriter = createCsvFile(true);   // For appending data
+  
+  // If file doesn't exist yet, initialize it with headers only
+  if (!fileExists) {
+    console.log('Initializing new CSV file with headers...');
+    await initialCsvWriter.writeRecords([]);
+  }
+  
+  // Array to collect all results for tracking purposes only
+  const allResults = [];
   
   console.log('Starting ecoinvent product name scraper');
   console.log(`ID range: ${debugStartId} to ${debugEndId}`);
@@ -94,19 +122,39 @@ async function scrapeProductNames() {
           timeout: config.timeouts.selector 
         });
 
-        // Check for error page
-        try{
+        // Check for error page with Oh No message
+        let hasErrorPage = false;
+        try {
           const errorHeading = await page.waitForSelector('h1.chakra-heading', {
             state: 'visible',
             timeout: 1000,
-            filter: (element) => element.textContent.includes('Oh no...')
+            filter: (element) => element.textContent.includes('Oh No')
           });
+          
           if (errorHeading) {
-            console.log("SKIP")
-            continue;
+            console.log(`[${id}] Found "Oh No..." error page, skipping dataset`);
+            hasErrorPage = true;
+            
+            // Create error record for Oh No error pages
+            const errorRecord = {
+              id,
+              productName: 'Error: Error page detected',
+              geography: '',
+              referenceProduct: '',
+              unit: '',
+              documentation: ''
+            };
+            
+            // Add to results array and write to CSV immediately
+            allResults.push(errorRecord);
+            console.log(`[${id}] Writing error record to CSV...`);
+            await appendCsvWriter.writeRecords([errorRecord]);
+            
+            errorCount++;
+            continue; // Skip to next ID
           }
         } catch(error) {
-          // continue
+          // No error page found, continue with scraping
         }
       
         // Wait for data to be loaded (not placeholders) 
@@ -276,15 +324,22 @@ async function scrapeProductNames() {
           return 'Documentation not found';
         }) : 'Documentation section skipped (timeout)';
         
-        // Add all extracted data to results array
-        allResults.push({
+        // Create data record for this dataset
+        const dataRecord = {
           id,
           productName,
           geography,
           referenceProduct,
           unit,
           documentation
-        });
+        };
+        
+        // Add to the results array for tracking
+        allResults.push(dataRecord);
+        
+        // Write this record to CSV immediately - using append mode
+        console.log(`[${id}] Writing data to CSV file...`);
+        await appendCsvWriter.writeRecords([dataRecord]);
         
         // Log the extracted data
         console.log(`[${id}] Extracted data:
@@ -300,15 +355,22 @@ async function scrapeProductNames() {
         console.error(`[${id}] Error: ${error.message}`);
         errorCount++;
         
-        // Add error entry to results
-        allResults.push({
+        // Create error record
+        const errorRecord = {
           id,
           productName: 'Error: ' + error.message,
           geography: '',
           referenceProduct: '',
           unit: '',
           documentation: ''
-        });
+        };
+        
+        // Add error entry to results array
+        allResults.push(errorRecord);
+        
+        // Write error record to CSV immediately
+        console.log(`[${id}] Writing error record to CSV...`);
+        await appendCsvWriter.writeRecords([errorRecord]);
       }
       
       // Rate limiting between requests
@@ -318,14 +380,9 @@ async function scrapeProductNames() {
     // Close browser
     await browser.close();
     
-    // Ensure output directory exists
-    await fs.ensureDir(config.outputDir);
+    // No need to write CSV file again - all records have already been written immediately after extraction
     
-    // Write results to CSV
-    console.log(`Writing ${allResults.length} records to CSV file...`);
-    await csvWriter.writeRecords(allResults);
-    
-    // Get full path to CSV file for output
+    // Get full path to CSV file for output summary
     const csvPath = path.resolve(path.join(config.outputDir, 'ecoinvent_data.csv'));
     console.log(`Successfully wrote ${allResults.length} records to CSV file: ${csvPath}`);
     
