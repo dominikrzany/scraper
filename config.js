@@ -6,7 +6,7 @@ module.exports = {
   baseUrl: 'https://ecoquery.ecoinvent.org/3.11/cutoff/dataset',
   
   // Range of dataset IDs to scrape
-  startId: 168,
+  startId: 199,
   endId: 240, // Testing with fewer IDs
   
   // Timeouts (in milliseconds)
